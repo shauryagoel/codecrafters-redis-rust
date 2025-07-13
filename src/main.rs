@@ -2,7 +2,7 @@ use core::panic;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use tokio::{
@@ -12,7 +12,8 @@ use tokio::{
 
 struct RedisValue {
     val: String,
-    expiry: SystemTime,
+    creation_time: SystemTime,
+    ttl: Option<u64>, // in ms; it is optional as it may not be present for every key and represents infinite TTL
 }
 
 // A very basic parser for RESP
@@ -68,21 +69,60 @@ async fn process(
             "ping" => "+PONG\r\n",
             "echo" => &format!("+{}\r\n", parsed_command[1].as_str()), // TODO: why .as_str() doesn't work here???
             "set" => {
-                // Overwrite the value if key already exists
+                // Infinite TTL
+                let mut ttl_ms: Option<u64> = None;
+
+                // If expiry time parameters are passed then set TTL (in ms) else TTL is infinite
+                if parsed_command.len() >= 5 {
+                    // let (_time_format, ttl_ms) = (parsed_command[3].clone(), parsed_command[4].clone();
+                    ttl_ms = Some(parsed_command[4].parse::<u64>().unwrap());
+                }
+
+                // This overwrites the value if the key already exists
                 redis_key_val_store.lock().unwrap().insert(
                     parsed_command[1].clone(),
                     RedisValue {
                         val: parsed_command[2].clone(),
-                        expiry: SystemTime::now(),
+                        creation_time: SystemTime::now(),
+                        ttl: ttl_ms,
                     },
                 );
                 "+OK\r\n"
             }
             "get" => {
+                let mut store = redis_key_val_store.lock().unwrap();
+                let returned_value = match store.get(parsed_command[1].as_str()) {
+                    Some(x) => {
+                        let key_expired = x.ttl.is_some()
+                            && SystemTime::now()
+                                > x.creation_time + Duration::from_millis(x.ttl.unwrap());
+                        if key_expired {
+                            // Remove the key as it has expired
+                            store.remove(&parsed_command[1]);
+                            "-1" // Return "Null bulk string" if the input key has expired and consequently does not exist
+                        } else {
+                            &format!("{}\r\n{}", x.val.len(), x.val)
+                        }
+                    }
+                    None => "-1", // Return "Null bulk string" if the input key does not exist
+                };
+                &format!("${}\r\n", returned_value)
+            }
+            "ttl" => {
                 let store = redis_key_val_store.lock().unwrap();
                 let returned_value = match store.get(parsed_command[1].as_str()) {
-                    Some(x) => x.val.as_str(),
-                    None => "-1",
+                    Some(x) => {
+                        match x.ttl {
+                            Some(ttl) => {
+                                let ttl_left = (x.creation_time + Duration::from_millis(ttl))
+                                    .duration_since(SystemTime::now())
+                                    .unwrap_or_default(); // When the key has expired, set the duration to default of 0
+                                &(ttl_left.as_millis()).to_string()
+                            }
+                            None => "-1", // Key with no TTL set
+                        }
+                    }
+                    None => "-1", // Key does not exist
                 };
                 &format!("+{}\r\n", returned_value)
             }
