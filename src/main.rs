@@ -1,9 +1,19 @@
 use core::panic;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+
+struct RedisValue {
+    val: String,
+    expiry: SystemTime,
+}
 
 // A very basic parser for RESP
 // Currently only handles non-nested arrays
@@ -39,7 +49,10 @@ fn parse_command(input: &str) -> Vec<String> {
     command_list
 }
 
-async fn process(mut stream: TcpStream) {
+async fn process(
+    mut stream: TcpStream,
+    redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>,
+) {
     let mut buf = [0; 1024];
 
     while let Ok(bytes_read) = stream.read(&mut buf).await {
@@ -49,10 +62,30 @@ async fn process(mut stream: TcpStream) {
         let parsed_command = parse_command(std::str::from_utf8(&buf[..bytes_read]).unwrap());
 
         // Main Redis Server functioning
+
         // Redis commands are case insensitive
         let redis_output = match parsed_command[0].to_lowercase().as_str() {
             "ping" => "+PONG\r\n",
-            "echo" => &format!("+{}\r\n", parsed_command[1].as_str()),
+            "echo" => &format!("+{}\r\n", parsed_command[1].as_str()), // TODO: why .as_str() doesn't work here???
+            "set" => {
+                // Overwrite the value if key already exists
+                redis_key_val_store.lock().unwrap().insert(
+                    parsed_command[1].clone(),
+                    RedisValue {
+                        val: parsed_command[2].clone(),
+                        expiry: SystemTime::now(),
+                    },
+                );
+                "+OK\r\n"
+            }
+            "get" => {
+                let store = redis_key_val_store.lock().unwrap();
+                let returned_value = match store.get(parsed_command[1].as_str()) {
+                    Some(x) => x.val.as_str(),
+                    None => "-1",
+                };
+                &format!("+{}\r\n", returned_value)
+            }
             _ => panic!("Command not supported"),
         };
 
@@ -64,14 +97,20 @@ async fn process(mut stream: TcpStream) {
 async fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
 
+    // Actual Redis key-val store
+    let redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     loop {
         match listener.accept().await {
             // The second item contains the IP and port of the new connection.
             Ok((stream, _)) => {
+                let redis_key_val_store = redis_key_val_store.clone();
+
                 // A new task is spawned for each inbound socket. The socket is
                 // moved to the new task and processed there.
                 tokio::spawn(async move {
-                    process(stream).await;
+                    process(stream, redis_key_val_store).await;
                 });
             }
             Err(e) => {
