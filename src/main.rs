@@ -9,8 +9,13 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+// Handle different types of possible values for a key
+enum RedisType {
+    Val(String),
+}
+
 struct RedisValue {
-    val: String,
+    value: RedisType,
     creation_time: SystemTime,
     ttl: Option<u64>, // in ms; it is optional as it may not be present for every key and represents infinite TTL
 }
@@ -107,7 +112,7 @@ async fn process(
                 redis_key_val_store.lock().unwrap().insert(
                     parsed_command[1].clone(),
                     RedisValue {
-                        val: parsed_command[2].clone(),
+                        value: RedisType::Val(parsed_command[2].clone()),
                         creation_time: SystemTime::now(),
                         ttl: ttl_ms,
                     },
@@ -127,7 +132,9 @@ async fn process(
                             store.remove(&parsed_command[1]);
                             "-1" // Return "Null bulk string" if the input key has expired and consequently does not exist
                         } else {
-                            &format!("{}\r\n{}", x.val.len(), x.val)
+                            match x.value {
+                                RedisType::Val(ref val) => &format!("{}\r\n{}", val.len(), val),
+                            }
                         }
                     }
                     None => "-1", // Return "Null bulk string" if the input key does not exist
