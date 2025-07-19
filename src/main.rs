@@ -12,6 +12,7 @@ use tokio::{
 // Handle different types of possible values for a key
 enum RedisType {
     Val(String),
+    List(Vec<String>),
 }
 
 struct RedisValue {
@@ -130,16 +131,18 @@ async fn process(
                             // Remove the key as it has expired
                             // This is called "PASSIVE EXPIRY" in Redis
                             store.remove(&parsed_command[1]);
-                            "-1" // Return "Null bulk string" if the input key has expired and consequently does not exist
+                            "$-1" // Return "Null bulk string" if the input key has expired and consequently does not exist
                         } else {
                             match x.value {
-                                RedisType::Val(ref val) => &format!("{}\r\n{}", val.len(), val),
+                                // Only accept string values
+                                RedisType::Val(ref val) => &format!("${}\r\n{}", val.len(), val),
+                                _ => "-WRONGTYPE Operation against a key holding the wrong kind of value",
                             }
                         }
                     }
-                    None => "-1", // Return "Null bulk string" if the input key does not exist
+                    None => "$-1", // Return "Null bulk string" if the input key does not exist
                 };
-                &format!("${}\r\n", returned_value)
+                &format!("{}\r\n", returned_value)
             }
             // In milliseconds
             "ttl" => {
@@ -164,11 +167,40 @@ async fn process(
                 let dbsize = redis_key_val_store.lock().unwrap().len();
                 &format!(":{}\r\n", dbsize)
             }
+            "rpush" => {
+                let mut store = redis_key_val_store.lock().unwrap();
+
+                let redis_val =
+                    store
+                        .entry(parsed_command[1].clone())
+                        .or_insert_with(|| RedisValue {
+                            value: RedisType::List(vec![]),
+                            creation_time: SystemTime::now(),
+                            ttl: None,
+                        });
+
+                let insertion_result: Result<usize, &str> = match &mut redis_val.value {
+                    RedisType::List(list) => {
+                        if parsed_command.len() <= 2 {
+                            Err("ERR wrong number of arguments for command")
+                        } else {
+                            list.append(&mut parsed_command[2..].to_vec()); // Move occurs here
+                            Ok(list.len())
+                        }
+                    }
+                    _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
+                };
+
+                match insertion_result {
+                    Ok(len) => &format!(":{len}\r\n"),
+                    Err(err) => &format!("-{err}\r\n"),
+                }
+            }
             _ => {
                 // Handle case of unknown command
                 let args = parsed_command
                     .iter()
-                    .skip(1) // First is the command so skip it
+                    .skip(1) // First element is the command so skip it
                     .fold(String::new(), |acc, x| acc + "`" + x + "`, ");
                 &format!(
                     "-ERR unknown command `{}`, with args beginning with: {}\r\n",
