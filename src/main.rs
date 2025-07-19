@@ -1,4 +1,3 @@
-use core::panic;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -158,7 +157,17 @@ async fn process(
                 let dbsize = redis_key_val_store.lock().unwrap().len();
                 &format!(":{}\r\n", dbsize)
             }
-            _ => panic!("Command not supported"),
+            _ => {
+                // Handle case of unknown command
+                let args = parsed_command
+                    .iter()
+                    .skip(1) // First is the command so skip it
+                    .fold(String::new(), |acc, x| acc + "`" + x + "`, ");
+                &format!(
+                    "-ERR unknown command `{}`, with args beginning with: {}\r\n",
+                    parsed_command[0], args,
+                )
+            }
         };
 
         stream.write_all(redis_output.as_bytes()).await.unwrap();
