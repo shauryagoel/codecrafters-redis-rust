@@ -16,6 +16,31 @@ struct RedisValue {
     ttl: Option<u64>, // in ms; it is optional as it may not be present for every key and represents infinite TTL
 }
 
+// Periodically remove the expired keys
+// Procedure-
+// 1) Randomly sample the HashMap keys and check its TTL.
+// 2) If TTL is expired, then remove it from the HashMap. (TODO: need to do this efficiently, maybe by storing the keys in a Vec also)
+// 3) Sleep for some time.
+// 4) Repeat from step 1.
+// async fn delete_expired_keys(redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>) {
+//     loop {
+//         // Sleep for 1 second before checking for expired keys
+//         time::sleep(Duration::from_secs(1)).await;
+//         let mut store = redis_key_val_store.lock().unwrap();
+//         let current_time = SystemTime::now();
+//         // let dbsize = store.len();
+//
+//         // Iterate through the keys and remove expired ones
+//         store.retain(|_, value| {
+//             if let Some(ttl) = value.ttl {
+//                 current_time < value.creation_time + Duration::from_millis(ttl)
+//             } else {
+//                 true // Keep keys with no TTL
+//             }
+//         });
+//     }
+// }
+
 // A very basic parser for RESP
 // Currently only handles non-nested arrays
 // Returns the parsed output in human readable form
@@ -54,6 +79,7 @@ async fn process(
     mut stream: TcpStream,
     redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>,
 ) {
+    // Can handle input string of 1024 bytes
     let mut buf = [0; 1024];
 
     while let Ok(bytes_read) = stream.read(&mut buf).await {
@@ -98,6 +124,7 @@ async fn process(
                                 > x.creation_time + Duration::from_millis(x.ttl.unwrap());
                         if key_expired {
                             // Remove the key as it has expired
+                            // This is called "PASSIVE EXPIRY" in Redis
                             store.remove(&parsed_command[1]);
                             "-1" // Return "Null bulk string" if the input key has expired and consequently does not exist
                         } else {
@@ -108,6 +135,7 @@ async fn process(
                 };
                 &format!("${}\r\n", returned_value)
             }
+            // In milliseconds
             "ttl" => {
                 let store = redis_key_val_store.lock().unwrap();
                 let returned_value = match store.get(parsed_command[1].as_str()) {
@@ -126,6 +154,10 @@ async fn process(
                 };
                 &format!("+{}\r\n", returned_value)
             }
+            "dbsize" => {
+                let dbsize = redis_key_val_store.lock().unwrap().len();
+                &format!(":{}\r\n", dbsize)
+            }
             _ => panic!("Command not supported"),
         };
 
@@ -141,11 +173,18 @@ async fn main() {
     let redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // // Handle "ACTIVE EXPIRY" of keys
+    // let store = redis_key_val_store.clone();
+    // tokio::spawn(async move {
+    //     delete_expired_keys(store).await;
+    // });
+
     loop {
         match listener.accept().await {
             // The second item contains the IP and port of the new connection.
             Ok((stream, _)) => {
                 let redis_key_val_store = redis_key_val_store.clone();
+                // let redis_key_val_store = Arc::clone(&redis_key_val_store); // Same as .clone()
 
                 // A new task is spawned for each inbound socket. The socket is
                 // moved to the new task and processed there.
