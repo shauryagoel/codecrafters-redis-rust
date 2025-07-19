@@ -46,6 +46,41 @@ struct RedisValue {
 //     }
 // }
 
+// Compute output of the LRANGE command in human readable form, or an error
+fn lrange(
+    redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>,
+    parsed_command: Vec<String>,
+) -> Result<Vec<String>, &'static str> {
+    let store = redis_key_val_store.lock().unwrap();
+
+    let mut output_array: Vec<String> = Vec::new();
+
+    if let Some(redis_val) = store.get(parsed_command[1].as_str()) {
+        let list_at_key = match redis_val.value {
+            RedisType::List(ref list) => list,
+            _ => return Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
+        };
+        let (start_index, stop_index) = (parsed_command[2].clone(), parsed_command[3].clone());
+
+        let list_length = list_at_key.len();
+        let mut start_index = start_index.parse::<usize>().unwrap_or(list_length);
+        let mut stop_index = stop_index.parse::<usize>().unwrap_or(list_length);
+
+        start_index = start_index.max(0);
+        stop_index = stop_index.min(list_length - 1);
+
+        if start_index > stop_index {
+            return Ok(output_array);
+        }
+
+        output_array.append(&mut list_at_key[start_index..=stop_index].to_vec());
+        Ok(output_array)
+    } else {
+        // Return empty array if the key doesn't exist
+        Ok(output_array)
+    }
+}
+
 // A very basic parser for RESP
 // Currently only handles non-nested arrays
 // Returns the parsed output in human readable form
@@ -170,6 +205,7 @@ async fn process(
             "rpush" => {
                 let mut store = redis_key_val_store.lock().unwrap();
 
+                // Get the reference to the value; if the key doesn't exist then create it
                 let redis_val =
                     store
                         .entry(parsed_command[1].clone())
@@ -179,6 +215,7 @@ async fn process(
                             ttl: None,
                         });
 
+                // Insert the desired data to the referenced value, taking care of errors
                 let insertion_result: Result<usize, &str> = match &mut redis_val.value {
                     RedisType::List(list) => {
                         if parsed_command.len() <= 2 {
@@ -191,8 +228,23 @@ async fn process(
                     _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
                 };
 
+                // Convert to RESP and return the result
                 match insertion_result {
                     Ok(len) => &format!(":{len}\r\n"),
+                    Err(err) => &format!("-{err}\r\n"),
+                }
+            }
+            "lrange" => {
+                let lrange_output = lrange(redis_key_val_store.clone(), parsed_command);
+
+                // Convert to RESP and return the result
+                match lrange_output {
+                    Ok(output_array) => {
+                        let output_string = format!("*{}\r\n", output_array.len());
+                        &output_array.iter().fold(output_string.clone(), |acc, x| {
+                            acc + "$" + x.len().to_string().as_str() + "\r\n" + x + "\r\n"
+                        })
+                    }
                     Err(err) => &format!("-{err}\r\n"),
                 }
             }
