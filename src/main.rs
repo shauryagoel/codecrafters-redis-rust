@@ -62,10 +62,16 @@ fn lrange(
         };
         let (start_index, stop_index) = (parsed_command[2].clone(), parsed_command[3].clone());
 
-        let list_length = list_at_key.len();
-        let mut start_index = start_index.parse::<usize>().unwrap_or(list_length);
-        let mut stop_index = stop_index.parse::<usize>().unwrap_or(list_length);
+        let list_length = list_at_key.len() as i32;
+        let mut start_index = start_index.parse::<i32>().unwrap_or(list_length);
+        let mut stop_index = stop_index.parse::<i32>().unwrap_or(list_length);
 
+        if start_index < 0 {
+            start_index += list_length;
+        }
+        if stop_index < 0 {
+            stop_index += list_length;
+        }
         start_index = start_index.max(0);
         stop_index = stop_index.min(list_length - 1);
 
@@ -73,6 +79,8 @@ fn lrange(
             return Ok(output_array);
         }
 
+        let start_index = start_index as usize;
+        let stop_index = stop_index as usize;
         output_array.append(&mut list_at_key[start_index..=stop_index].to_vec());
         Ok(output_array)
     } else {
