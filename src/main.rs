@@ -1,25 +1,55 @@
+//! Redis server clone in Rust
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf,
+    clippy::nursery
+)]
+// These are from clippy::restriction
+#![warn(
+    clippy::missing_docs_in_private_items,
+    clippy::infinite_loop,
+    clippy::clone_on_ref_ptr,
+    clippy::allow_attributes,
+    clippy::allow_attributes_without_reason,
+    clippy::absolute_paths,
+    clippy::pattern_type_mismatch,
+    clippy::dbg_macro
+)]
+
 use std::{
+    borrow::Cow,
     collections::{HashMap, VecDeque},
-    env,
+    env, str,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
 };
 
-// Handle different types of possible values for a key
+/// Represent different types of possible values for a key.
 enum RedisType {
-    Val(String),
+    /// Array/list data type.
     List(VecDeque<String>),
+    /// String data type.
+    Val(String),
 }
 
+/// Represent all the data for a key
 struct RedisValue {
-    value: RedisType,
+    /// Creation time of the key
     creation_time: SystemTime,
-    ttl: Option<u64>, // in ms; it is optional as it may not be present for every key and represents infinite TTL
+    /// Actual data
+    data: RedisType,
+    /// TTL of the key
+    ttl: Option<u64>, // in ms; it is optional as it may not be present for every key and thus will be infinite
 }
 
 // Periodically remove the expired keys
@@ -47,25 +77,27 @@ struct RedisValue {
 //     }
 // }
 
-// Compute output of the LRANGE command in human readable form, or an error
+/// Compute output of the LRANGE command in human readable form, or an error
 fn lrange(
-    redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>,
-    parsed_command: Vec<String>,
+    redis_key_val_store: &Arc<Mutex<HashMap<String, RedisValue>>>,
+    parsed_command: &[String],
 ) -> Result<Vec<String>, &'static str> {
-    let store = redis_key_val_store.lock().unwrap();
-
     let mut output_array: Vec<String> = Vec::new();
 
-    if let Some(redis_val) = store.get(parsed_command[1].as_str()) {
-        let list_at_key = match redis_val.value {
-            RedisType::List(ref list) => list,
-            _ => return Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
+    if let Some(redis_val) = redis_key_val_store
+        .lock()
+        .unwrap()
+        .get(parsed_command[1].as_str())
+    {
+        let RedisType::List(ref list_at_key) = redis_val.data else {
+            return Err("WRONGTYPE Operation against a key holding the wrong kind of value");
         };
         let (start_index, stop_index) = (parsed_command[2].clone(), parsed_command[3].clone());
 
-        let list_length = list_at_key.len() as i32;
-        let mut start_index = start_index.parse::<i32>().unwrap_or(list_length);
-        let mut stop_index = stop_index.parse::<i32>().unwrap_or(list_length);
+        // Crash if aren't able to go from usize to isize
+        let list_length = isize::try_from(list_at_key.len()).unwrap();
+        let mut start_index = start_index.parse::<isize>().unwrap_or(list_length);
+        let mut stop_index = stop_index.parse::<isize>().unwrap_or(list_length);
 
         if start_index < 0 {
             start_index += list_length;
@@ -80,34 +112,42 @@ fn lrange(
             return Ok(output_array);
         }
 
+        #[expect(clippy::cast_sign_loss, reason = "Negative value is clipped above")]
         let start_index = start_index as usize;
+        #[expect(clippy::cast_sign_loss, reason = "Negative value causes early return")]
         let stop_index = stop_index as usize;
+
         output_array = (start_index..=stop_index)
             .map(|x| list_at_key.get(x).unwrap().clone())
             .collect();
-        Ok(output_array)
-    } else {
-        // Return empty array if the key doesn't exist
-        Ok(output_array)
     }
+    Ok(output_array)
 }
 
-// A very basic parser for RESP
-// Currently only handles non-nested arrays
-// Returns the parsed output in human readable form
+/// A very basic parser for RESP
+/// Currently only handles non-nested arrays
+/// Returns the parsed output in human readable form
 fn parse_command(input: &str) -> Vec<String> {
-    let mut command_list: Vec<String> = vec![];
+    #[expect(
+        clippy::collection_is_never_read,
+        reason = "Will solve this in future when writing proper parser"
+    )]
+    let mut command_list: Vec<String> = Vec::new();
 
     let mut input_it = input.trim().chars().enumerate();
     // for (ind, char) in input_it {
     while let Some((ind, char)) = input_it.next() {
+        #[expect(
+            clippy::single_match,
+            reason = "Will solve this in future when writing proper parser"
+        )]
         match char {
             '*' => {
                 let (ind2, _) = input_it.find(|&x| x.1 == '\r').unwrap();
                 command_list.push(String::from(&input[ind..ind2]));
                 input_it.next();
             }
-            _ => continue,
+            _ => (),
         }
     }
 
@@ -117,7 +157,7 @@ fn parse_command(input: &str) -> Vec<String> {
     // Extract only the valid strings for now
     // The previous code is useless for now, but, might become useful later on
     let mut command_list: Vec<String> = vec![];
-    for string in input.trim().split("\r\n") {
+    for string in input.lines() {
         if string.starts_with(['*', '$']) {
             continue;
         }
@@ -127,6 +167,12 @@ fn parse_command(input: &str) -> Vec<String> {
     command_list
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Will handle this later by creating a Redis class"
+)]
+/// Process a client connection
+/// This function handles multiple requests from a single client
 async fn process(
     mut stream: TcpStream,
     redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>,
@@ -138,7 +184,7 @@ async fn process(
         if bytes_read == 0 {
             break;
         }
-        let parsed_command = parse_command(std::str::from_utf8(&buf[..bytes_read]).unwrap());
+        let parsed_command = parse_command(str::from_utf8(&buf[..bytes_read]).unwrap());
 
         // Main Redis Server functioning
 
@@ -148,20 +194,18 @@ async fn process(
             "echo" => &format!("+{}\r\n", parsed_command[1].as_str()), // TODO: why .as_str() doesn't work here???
             "client" => "+OK\r\n+OK\r\n", // Default redis-rs client sends 2 arrays when creating connection
             "set" => {
-                // Infinite TTL
-                let mut ttl_ms: Option<u64> = None;
-
                 // If expiry time parameters are passed then set TTL (in ms) else TTL is infinite
-                if parsed_command.len() >= 5 {
-                    // let (_time_format, ttl_ms) = (parsed_command[3].clone(), parsed_command[4].clone();
-                    ttl_ms = Some(parsed_command[4].parse::<u64>().unwrap());
-                }
+                let ttl_ms = if parsed_command.len() >= 5 {
+                    Some(parsed_command[4].parse::<u64>().unwrap())
+                } else {
+                    None // Infinite TTL
+                };
 
                 // This overwrites the value if the key already exists
                 redis_key_val_store.lock().unwrap().insert(
                     parsed_command[1].clone(),
                     RedisValue {
-                        value: RedisType::Val(parsed_command[2].clone()),
+                        data: RedisType::Val(parsed_command[2].clone()),
                         creation_time: SystemTime::now(),
                         ttl: ttl_ms,
                     },
@@ -170,6 +214,10 @@ async fn process(
             }
             "get" => {
                 let mut store = redis_key_val_store.lock().unwrap();
+                #[expect(
+                    clippy::option_if_let_else,
+                    reason = "Difficult to handle this case as `store` is causing borrow checker issues inside closure"
+                )]
                 let returned_value = match store.get(parsed_command[1].as_str()) {
                     Some(x) => {
                         let key_expired = x.ttl.is_some()
@@ -179,9 +227,11 @@ async fn process(
                             // Remove the key as it has expired
                             // This is called "PASSIVE EXPIRY" in Redis
                             store.remove(&parsed_command[1]);
+                            drop(store);
                             "$-1" // Return "Null bulk string" if the input key has expired and consequently does not exist
                         } else {
-                            match x.value {
+                            #[expect(clippy::match_wildcard_for_single_variants, reason="As only RedisType::Val is allowed for 'GET' operations")]
+                            match x.data {
                                 // Only accept string values
                                 RedisType::Val(ref val) => &format!("${}\r\n{}", val.len(), val),
                                 _ => "-WRONGTYPE Operation against a key holding the wrong kind of value",
@@ -190,30 +240,33 @@ async fn process(
                     }
                     None => "$-1", // Return "Null bulk string" if the input key does not exist
                 };
-                &format!("{}\r\n", returned_value)
+                &format!("{returned_value}\r\n")
             }
             // In milliseconds
             "ttl" => {
-                let store = redis_key_val_store.lock().unwrap();
-                let returned_value = match store.get(parsed_command[1].as_str()) {
-                    Some(x) => {
-                        match x.ttl {
-                            Some(ttl) => {
-                                let ttl_left = (x.creation_time + Duration::from_millis(ttl))
-                                    .duration_since(SystemTime::now())
-                                    .unwrap_or_default(); // When the key has expired, set the duration to default of 0
-                                &(ttl_left.as_millis()).to_string()
-                            }
-                            None => "-1", // Key with no TTL set
-                        }
-                    }
-                    None => "-1", // Key does not exist
-                };
-                &format!("+{}\r\n", returned_value)
+                let returned_value = redis_key_val_store
+                    .lock()
+                    .unwrap()
+                    .get(parsed_command[1].as_str())
+                    .map_or_else(
+                        || String::from("-1"), // Key does not exist
+                        |x| {
+                            x.ttl.map_or_else(
+                                || String::from("-1"), // Key with no TTL set
+                                |ttl| {
+                                    let ttl_left = (x.creation_time + Duration::from_millis(ttl))
+                                        .duration_since(SystemTime::now())
+                                        .unwrap_or_default(); // When the key has expired, set the duration to default of 0
+                                    ttl_left.as_millis().to_string()
+                                },
+                            )
+                        },
+                    );
+                &format!("+{returned_value}\r\n")
             }
             "dbsize" => {
                 let dbsize = redis_key_val_store.lock().unwrap().len();
-                &format!(":{}\r\n", dbsize)
+                &format!(":{dbsize}\r\n")
             }
             "rpush" => {
                 let mut store = redis_key_val_store.lock().unwrap();
@@ -223,14 +276,18 @@ async fn process(
                     store
                         .entry(parsed_command[1].clone())
                         .or_insert_with(|| RedisValue {
-                            value: RedisType::List(VecDeque::new()),
+                            data: RedisType::List(VecDeque::new()),
                             creation_time: SystemTime::now(),
                             ttl: None,
                         });
 
+                #[expect(
+                    clippy::match_wildcard_for_single_variants,
+                    reason = "rpush command works only on List"
+                )]
                 // Insert the desired data to the referenced value, taking care of errors
-                let insertion_result: Result<usize, &str> = match &mut redis_val.value {
-                    RedisType::List(list) => {
+                let insertion_result: Result<usize, &str> = match redis_val.data {
+                    RedisType::List(ref mut list) => {
                         if parsed_command.len() <= 2 {
                             Err("ERR wrong number of arguments for command")
                         } else {
@@ -247,6 +304,7 @@ async fn process(
                     }
                     _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
                 };
+                drop(store);
 
                 // Convert to RESP and return the result
                 match insertion_result {
@@ -262,14 +320,18 @@ async fn process(
                     store
                         .entry(parsed_command[1].clone())
                         .or_insert_with(|| RedisValue {
-                            value: RedisType::List(VecDeque::new()),
+                            data: RedisType::List(VecDeque::new()),
                             creation_time: SystemTime::now(),
                             ttl: None,
                         });
 
+                #[expect(
+                    clippy::match_wildcard_for_single_variants,
+                    reason = "lpush command works only on List"
+                )]
                 // Insert the desired data to the referenced value, taking care of errors
-                let insertion_result: Result<usize, &str> = match &mut redis_val.value {
-                    RedisType::List(list) => {
+                let insertion_result: Result<usize, &str> = match redis_val.data {
+                    RedisType::List(ref mut list) => {
                         if parsed_command.len() <= 2 {
                             Err("ERR wrong number of arguments for command")
                         } else {
@@ -281,6 +343,7 @@ async fn process(
                     }
                     _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
                 };
+                drop(store);
 
                 // Convert to RESP and return the result
                 match insertion_result {
@@ -289,7 +352,7 @@ async fn process(
                 }
             }
             "lrange" => {
-                let lrange_output = lrange(redis_key_val_store.clone(), parsed_command);
+                let lrange_output = lrange(&redis_key_val_store, &parsed_command);
 
                 // Convert to RESP and return the result
                 match lrange_output {
@@ -305,16 +368,15 @@ async fn process(
             "llen" => {
                 let store = redis_key_val_store.lock().unwrap();
 
-                if let Some(redis_val) = store.get(parsed_command[1].as_str()) {
-                    match &redis_val.value {
-                        RedisType::List(list) => &format!(":{}\r\n", list.len()),
+                #[expect(clippy::match_wildcard_for_single_variants, reason = "llen command works only on List")]
+                &store
+                    .get(parsed_command[1].as_str())
+                    .map_or(Cow::Borrowed(":0\r\n"), |redis_val| match redis_val.data {
+                        RedisType::List(ref list) => Cow::Owned(format!(":{}\r\n", list.len())),
                         _ => {
-                            "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            Cow::Borrowed("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
                         }
-                    }
-                } else {
-                    ":0\r\n"
-                }
+                    })
             }
             "lpop" => {
                 let mut store = redis_key_val_store.lock().unwrap();
@@ -323,8 +385,12 @@ async fn process(
                     .map_or(1, |x| x.parse::<u32>().unwrap());
 
                 if let Some(redis_val) = store.get_mut(parsed_command[1].as_str()) {
-                    match &mut redis_val.value {
-                        RedisType::List(list) => {
+                    #[expect(
+                        clippy::match_wildcard_for_single_variants,
+                        reason = "lpop command works only on List"
+                    )]
+                    match redis_val.data {
+                        RedisType::List(ref mut list) => {
                             let output_array: Vec<String> =
                                 (1..=times_to_pop).map_while(|_| list.pop_front()).collect();
 
@@ -332,6 +398,7 @@ async fn process(
                             if list.is_empty() {
                                 store.remove(&parsed_command[1]);
                             }
+                            drop(store);
 
                             if output_array.is_empty() {
                                 "$-1\r\n"
@@ -370,7 +437,7 @@ async fn process(
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ! {
     // Second argument must be `port`
     let mut args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -396,8 +463,7 @@ async fn main() {
         match listener.accept().await {
             // The second item contains the IP and port of the new connection.
             Ok((stream, _)) => {
-                let redis_key_val_store = redis_key_val_store.clone();
-                // let redis_key_val_store = Arc::clone(&redis_key_val_store); // Same as .clone()
+                let redis_key_val_store = Arc::clone(&redis_key_val_store); // Same as .clone()
 
                 // A new task is spawned for each inbound socket. The socket is
                 // moved to the new task and processed there.
@@ -406,7 +472,7 @@ async fn main() {
                 });
             }
             Err(e) => {
-                println!("error: {}", e);
+                eprintln!("error: {e}");
             }
         }
     }
