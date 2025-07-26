@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -113,6 +114,7 @@ fn parse_command(input: &str) -> Vec<String> {
 
     // Extract only the valid strings for now
     // The previous code is useless for now, but, might become useful later on
+    let mut command_list: Vec<String> = vec![];
     for string in input.trim().split("\r\n") {
         if string.starts_with(['*', '$']) {
             continue;
@@ -275,7 +277,16 @@ async fn process(
 
 #[tokio::main]
 async fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    // Second argument must be `port`
+    let mut args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        args.push("6379".to_string());
+    }
+    let port = args[1].as_str();
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
 
     // Actual Redis key-val store
     let redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>> =
