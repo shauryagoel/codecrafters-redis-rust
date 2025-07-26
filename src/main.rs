@@ -254,6 +254,40 @@ async fn process(
                     Err(err) => &format!("-{err}\r\n"),
                 }
             }
+            "lpush" => {
+                let mut store = redis_key_val_store.lock().unwrap();
+
+                // Get the reference to the value; if the key doesn't exist then create it
+                let redis_val =
+                    store
+                        .entry(parsed_command[1].clone())
+                        .or_insert_with(|| RedisValue {
+                            value: RedisType::List(VecDeque::new()),
+                            creation_time: SystemTime::now(),
+                            ttl: None,
+                        });
+
+                // Insert the desired data to the referenced value, taking care of errors
+                let insertion_result: Result<usize, &str> = match &mut redis_val.value {
+                    RedisType::List(list) => {
+                        if parsed_command.len() <= 2 {
+                            Err("ERR wrong number of arguments for command")
+                        } else {
+                            for x in parsed_command[2..].iter().cloned() {
+                                list.push_front(x);
+                            }
+                            Ok(list.len())
+                        }
+                    }
+                    _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
+                };
+
+                // Convert to RESP and return the result
+                match insertion_result {
+                    Ok(len) => &format!(":{len}\r\n"),
+                    Err(err) => &format!("-{err}\r\n"),
+                }
+            }
             "lrange" => {
                 let lrange_output = lrange(redis_key_val_store.clone(), parsed_command);
 

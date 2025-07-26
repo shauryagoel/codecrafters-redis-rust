@@ -136,4 +136,14 @@ fn test_array() {
     assert_eq!(lrange_result, vec!["bar".to_string(), "baz".to_string()]);
     let lrange_result: Vec<String> = con.lrange("list", 0, -5).unwrap();
     assert_eq!(lrange_result, vec!["foo".to_string(), "bar".to_string()]);
+
+    // (L)push the data
+    let lpush_result: usize = con.lpush("llist", "c").unwrap();
+    assert_eq!(lpush_result, 1);
+    let lpush_result: usize = con.lpush("llist", &["b", "a"]).unwrap();
+    assert_eq!(lpush_result, 3);
+
+    // Fetch the data
+    let lrange_result: Vec<String> = con.lrange("llist", 0, -1).unwrap();
+    assert_eq!(lrange_result, ["a", "b", "c"].to_vec());
 }
