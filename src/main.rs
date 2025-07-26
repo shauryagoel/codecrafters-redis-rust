@@ -112,7 +112,7 @@ fn parse_command(input: &str) -> Vec<String> {
     }
 
     // Currently, always guaranteed to contain a value
-    let _vector_length = command_list.pop().unwrap();
+    // let _vector_length = command_list.pop().unwrap();
 
     // Extract only the valid strings for now
     // The previous code is useless for now, but, might become useful later on
@@ -314,6 +314,42 @@ async fn process(
                     }
                 } else {
                     ":0\r\n"
+                }
+            }
+            "lpop" => {
+                let mut store = redis_key_val_store.lock().unwrap();
+                let times_to_pop = parsed_command
+                    .get(2)
+                    .map_or(1, |x| x.parse::<u32>().unwrap());
+
+                if let Some(redis_val) = store.get_mut(parsed_command[1].as_str()) {
+                    match &mut redis_val.value {
+                        RedisType::List(list) => {
+                            let output_array: Vec<String> =
+                                (1..=times_to_pop).map_while(|_| list.pop_front()).collect();
+
+                            // Remove the key from the store if its list has become empty
+                            if list.is_empty() {
+                                store.remove(&parsed_command[1]);
+                            }
+
+                            if output_array.is_empty() {
+                                "$-1\r\n"
+                            } else if output_array.len() == 1 {
+                                &format!("${}\r\n{}\r\n", output_array[0].len(), output_array[0])
+                            } else {
+                                let output_string = format!("*{}\r\n", output_array.len());
+                                &output_array.iter().fold(output_string.clone(), |acc, x| {
+                                    acc + "$" + x.len().to_string().as_str() + "\r\n" + x + "\r\n"
+                                })
+                            }
+                        }
+                        _ => {
+                            "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        }
+                    }
+                } else {
+                    "$-1\r\n"
                 }
             }
             _ => {

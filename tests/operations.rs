@@ -1,6 +1,7 @@
 use redis::Commands;
 use std::env;
 use std::net::TcpListener;
+use std::num::NonZero;
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
@@ -156,4 +157,32 @@ fn test_array() {
     // Fetch the data
     let lrange_result: Vec<String> = con.lrange("llist", 0, -1).unwrap();
     assert_eq!(lrange_result, ["a", "b", "c"].to_vec());
+}
+
+#[test]
+fn test_lpop() {
+    let port = &find_free_tcp_port().to_string();
+    let _server = start_server(port);
+    let client = redis::Client::open(format!("redis://127.0.0.1:{port}/")).unwrap();
+    let mut con = client.get_connection().unwrap();
+
+    let rpush_result: usize = con.rpush("list", &["a", "b", "c", "d"]).unwrap();
+    assert_eq!(rpush_result, 4);
+
+    let list_size: usize = con.llen("list").unwrap();
+    assert_eq!(list_size, 4);
+
+    // Lpop first element only
+    let lpop_result: Vec<String> = con.lpop("list", None).unwrap();
+    assert_eq!(lpop_result, ["a"].to_vec());
+
+    let list_size: usize = con.llen("list").unwrap();
+    assert_eq!(list_size, 3);
+
+    // Lpop 2 elements
+    let lpop_result: Vec<String> = con.lpop("list", NonZero::new(2)).unwrap();
+    assert_eq!(lpop_result, ["b", "c"].to_vec());
+
+    let list_size: usize = con.llen("list").unwrap();
+    assert_eq!(list_size, 1);
 }
