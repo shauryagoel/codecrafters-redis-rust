@@ -302,6 +302,20 @@ async fn process(
                     Err(err) => &format!("-{err}\r\n"),
                 }
             }
+            "llen" => {
+                let store = redis_key_val_store.lock().unwrap();
+
+                if let Some(redis_val) = store.get(parsed_command[1].as_str()) {
+                    match &redis_val.value {
+                        RedisType::List(list) => &format!(":{}\r\n", list.len()),
+                        _ => {
+                            "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        }
+                    }
+                } else {
+                    ":0\r\n"
+                }
+            }
             _ => {
                 // Handle case of unknown command
                 let args = parsed_command

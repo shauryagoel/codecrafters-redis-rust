@@ -109,8 +109,15 @@ fn test_array() {
     assert_eq!(rpush_result, 1);
     let rpush_result: usize = con.rpush("list", &["bar", "baz"]).unwrap();
     assert_eq!(rpush_result, 3);
+    let list_size: usize = con.llen("list").unwrap();
+    assert_eq!(list_size, 3);
     let rpush_result: usize = con.rpush("list", &["foo", "bar", "baz"]).unwrap();
     assert_eq!(rpush_result, 6);
+    let list_size: usize = con.llen("list").unwrap();
+    assert_eq!(list_size, 6);
+
+    let list_size: usize = con.llen("non_existent").unwrap();
+    assert_eq!(list_size, 0);
 
     // Fetch the data (for +ve indices)
     let lrange_result: Vec<String> = con.lrange("list", 0, 1).unwrap();
@@ -142,6 +149,9 @@ fn test_array() {
     assert_eq!(lpush_result, 1);
     let lpush_result: usize = con.lpush("llist", &["b", "a"]).unwrap();
     assert_eq!(lpush_result, 3);
+
+    let list_size: usize = con.llen("llist").unwrap();
+    assert_eq!(list_size, 3);
 
     // Fetch the data
     let lrange_result: Vec<String> = con.lrange("llist", 0, -1).unwrap();
