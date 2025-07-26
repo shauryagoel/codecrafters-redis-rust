@@ -144,6 +144,7 @@ async fn process(
         let redis_output = match parsed_command[0].to_lowercase().as_str() {
             "ping" => "+PONG\r\n",
             "echo" => &format!("+{}\r\n", parsed_command[1].as_str()), // TODO: why .as_str() doesn't work here???
+            "client" => "+OK\r\n+OK\r\n", // Default redis-rs client sends 2 arrays when creating connection
             "set" => {
                 // Infinite TTL
                 let mut ttl_ms: Option<u64> = None;
