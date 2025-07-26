@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -13,7 +13,7 @@ use tokio::{
 // Handle different types of possible values for a key
 enum RedisType {
     Val(String),
-    List(Vec<String>),
+    List(VecDeque<String>),
 }
 
 struct RedisValue {
@@ -82,7 +82,9 @@ fn lrange(
 
         let start_index = start_index as usize;
         let stop_index = stop_index as usize;
-        output_array.append(&mut list_at_key[start_index..=stop_index].to_vec());
+        output_array = (start_index..=stop_index)
+            .map(|x| list_at_key.get(x).unwrap().clone())
+            .collect();
         Ok(output_array)
     } else {
         // Return empty array if the key doesn't exist
@@ -221,7 +223,7 @@ async fn process(
                     store
                         .entry(parsed_command[1].clone())
                         .or_insert_with(|| RedisValue {
-                            value: RedisType::List(vec![]),
+                            value: RedisType::List(VecDeque::new()),
                             creation_time: SystemTime::now(),
                             ttl: None,
                         });
@@ -232,7 +234,14 @@ async fn process(
                         if parsed_command.len() <= 2 {
                             Err("ERR wrong number of arguments for command")
                         } else {
-                            list.append(&mut parsed_command[2..].to_vec()); // Move occurs here
+                            // // for x in parsed_command[2..].to_vec() {  TODO: why not ???
+                            // for x in parsed_command[2..].iter().cloned() {
+                            //     list.push_back(x);
+                            // }
+                            // TODO: Time this with above 3 lines
+                            // list.append(&mut parsed_command[2..].to_vec().into());
+                            // TODO: Time this with above line
+                            list.extend(parsed_command[2..].iter().cloned());
                             Ok(list.len())
                         }
                     }
