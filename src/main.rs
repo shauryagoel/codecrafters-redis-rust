@@ -32,6 +32,8 @@ use std::{
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
+    sync::oneshot::{Receiver, Sender},
+    sync::Mutex as TMutex,
 };
 
 /// Represent different types of possible values for a key.
@@ -176,6 +178,8 @@ fn parse_command(input: &str) -> Vec<String> {
 async fn process(
     mut stream: TcpStream,
     redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>>,
+    // oneshot_store: Arc<TMutex<HashMap<String, VecDeque<Sender<()>>>>>,
+    oneshot_store: Arc<Mutex<HashMap<String, VecDeque<Sender<()>>>>>,
 ) {
     // Can handle input string of 1024 bytes
     let mut buf = [0; 1024];
@@ -338,6 +342,18 @@ async fn process(
                             for x in parsed_command[2..].iter().cloned() {
                                 list.push_front(x);
                             }
+
+                            // Send trigger to the channel for the specified list
+                            // See `lbpop`
+                            // let _a = oneshot_store.lock().unwrap();
+                            if let Some(key) =
+                                oneshot_store.lock().unwrap().get_mut(&parsed_command[1])
+                            {
+                                if let Some(sender) = key.pop_front() {
+                                    sender.send(()).unwrap();
+                                }
+                            }
+
                             Ok(list.len())
                         }
                     }
@@ -419,6 +435,62 @@ async fn process(
                     "$-1\r\n"
                 }
             }
+            "lbpop" => {
+                let db_list_name = &parsed_command[1];
+                // let mut store = redis_key_val_store.lock().unwrap();
+
+                if let Some(redis_val) = redis_key_val_store.lock().unwrap().get_mut(db_list_name) {
+                    #[expect(
+                        clippy::match_wildcard_for_single_variants,
+                        reason = "lbpop command works only on List"
+                    )]
+                    match redis_val.data {
+                        RedisType::List(ref mut list) => {
+                            let val = list.pop_front().unwrap();
+
+                            // Remove the key from the store if its list has become empty
+                            // if list.is_empty() {
+                            //     store.remove(db_list_name);
+                            // }
+                            // drop(store);
+                            &format!("${}\r\n{}\r\n", val.len(), val)
+                        }
+                        _ => {
+                            "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        }
+                    }
+                } else {
+                    // let mut oneshot_store = oneshot_store.lock().await;
+                    let mut oneshot_store = oneshot_store.lock().unwrap();
+                    let channel = tokio::sync::oneshot::channel();
+
+                    let oneshot_val = oneshot_store.entry(db_list_name.clone()).or_default();
+                    oneshot_val.push_back(channel.0);
+                    drop(oneshot_store);
+
+                    channel.1.await;
+
+                    // if let Some(redis_val) = store.get_mut(db_list_name) {
+                    //     match redis_val.data {
+                    //         RedisType::List(ref mut list) => {
+                    //             let val = list.pop_front().unwrap();
+                    //
+                    //                 // Remove the key from the store if its list has become empty
+                    //                 if list.is_empty() {
+                    //                     store.remove(db_list_name);
+                    //                 }
+                    //                 drop(store);
+                    //             &format!("${}\r\n{}\r\n", val.len(), val)
+                    //         }
+                    //         _ => {
+                    //             "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                    //         }
+                    //     };
+                    // }
+
+                    "$1\r\n"
+                }
+            }
             _ => {
                 // Handle case of unknown command
                 let args = parsed_command
@@ -453,6 +525,12 @@ async fn main() -> ! {
     let redis_key_val_store: Arc<Mutex<HashMap<String, RedisValue>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // let oneshot_store: Arc<Mutex<HashMap<String, VecDeque<(Sender<()>, Receiver<()>)>>>> =
+    //     Arc::new(Mutex::new(HashMap::new()));
+    // let oneshot_store: Arc<TMutex<HashMap<String, VecDeque<Sender<()>>>>> =
+    let oneshot_store: Arc<Mutex<HashMap<String, VecDeque<Sender<()>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     // // Handle "ACTIVE EXPIRY" of keys
     // let store = redis_key_val_store.clone();
     // tokio::spawn(async move {
@@ -464,11 +542,13 @@ async fn main() -> ! {
             // The second item contains the IP and port of the new connection.
             Ok((stream, _)) => {
                 let redis_key_val_store = Arc::clone(&redis_key_val_store); // Same as .clone()
+                                                                            // let oneshot_store = oneshot_store.clone();
+                let oneshot_store = Arc::clone(&oneshot_store);
 
                 // A new task is spawned for each inbound socket. The socket is
                 // moved to the new task and processed there.
                 tokio::spawn(async move {
-                    process(stream, redis_key_val_store).await;
+                    process(stream, redis_key_val_store, oneshot_store).await;
                 });
             }
             Err(e) => {
